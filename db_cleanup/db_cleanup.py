@@ -1,104 +1,84 @@
+import sqlalchemy.orm
 from sqlalchemy import create_engine
-from sqlalchemy import select, delete
+from sqlalchemy import select
+from sqlalchemy import delete
 from sqlalchemy import Table
+from typing import Any
+from typing import Dict
+from typing import List
 from sqlalchemy import MetaData
+from sqlalchemy.orm import sessionmaker
 import logging
 import sys
-
-from environ import SQLALCHEMY_DATABASE_URI_UAT
 
 logging.basicConfig(stream=sys.stdout,
                     format='[%(asctime)s,%(msecs)d %(levelname)s]: %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S%z',
                     level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-engine = create_engine(SQLALCHEMY_DATABASE_URI_UAT, echo=False, future=True)
-
-metadata_obj = MetaData()
-metadata_obj.reflect(bind=engine)
-
-tables = [
-    {
-        'name': 'cart_product_addon',
-        'temp': 'tmp_cart_product_addon_cleanup'
-    },
-    {
-        'name': 'cart_product',
-        'temp': 'tmp_cart_product_cleanup_1'
-    },
-    {
-        'name': 'cart_product',
-        'temp': 'tmp_cart_product_cleanup_2'
-    },
-    {
-        'name': 'carts',
-        'temp': 'tmp_carts_cleanup'
-    },
-    {
-        'name': 'delivery_information',
-        'temp': 'tmp_delivery_information_cleanup'
-    },
-    {
-        'name': 'registration_information',
-        'temp': 'tmp_registeration_information_cleanup'
-    },
-    {
-        'name': 'transactions',
-        'temp': 'tmp_transaction_cleanup'
-    },
-    {
-        'name': 'users',
-        'temp': 'tmp_users_cleanup'
-    }
-]
 
 
-def select_data(table__: Table, limit_: int = 1000):
-    logger.info(
-        f'################################################## select_data ##################################################')
-    result_list = list()
-    logger.info(f'select_data: {table__.name} with limit: {limit_}')
-    with engine.connect() as conn:
-        stm = select(table__.c.id).limit(limit_)
-        result = conn.execute(stm)
-        conn.commit()
-        trans = result.all()
-        result_list.extend(trans)
-    logger.info(f'select_data: {table__.name} count of selected rows: {len(trans)}')
-    return [x.id for x in result_list]
+class DBManager:
+    def __init__(self, tables: List[Dict[str, str]], db_url: str, limit: int = 2000, alchemy_echo: bool = False):
+        # variable list
+        self.tables: List[Dict[str, str]] = tables
+        self.__db_url__: str = db_url
+        self.__echo__: bool = alchemy_echo
+        self.limit: int = limit
+        self.__metadata__: MetaData = None
+        self.__session_maker__: sqlalchemy.orm.sessionmaker = None
+        self.__engine__: sqlalchemy.engine.base.Engine = None
 
+        #     initializing the variables
+        self.__engine__ = create_engine(self.__db_url__, echo=self.__echo__, future=True)
+        self.__metadata__ = MetaData()
+        self.__metadata__.reflect(bind=self.__engine__)
+        self.__session_maker__ = sessionmaker(bind=self.__engine__)
 
-def delete_data(table__: Table, id_list: list):
-    logger.info(
-        f'################################################## delete_data ##################################################')
-    logger.info(f'delete_data: {table__.name} \t id_list:{id_list}')
-    count = 0
-    with engine.connect() as conn:
-        stm = delete(table__).where(table__.c.id.in_(id_list))
-        result = conn.execute(stm)
-        conn.commit()
-        count += result.rowcount
-    logger.info(f'delete_data: {table__.name} row count: {result.rowcount}')
+    def __select_data__(self, table_: Table, limit_: int = 1000) -> List[int]:
+        logger.info(f'select_data: {table_.name} with limit: {limit_}')
+        result_list = list()
+        with self.__session_maker__() as session:
+            stm = select(table_.c.id).limit(limit_)
+            result = session.execute(stm)
+            session.commit()
+            result_list = result.all()
+        logger.info(f'select_data: {table_.name} count of selected rows: {len(result_list)}')
+        return [x.id for x in result_list]
 
+    def __delete_data__(self, table__: Table, id_list: list) -> None:
+        logger.info(f'delete_data: {table__.name} \t id_list:{id_list}')
+        count = 0
+        with self.__session_maker__() as session:
+            stm = delete(table__).where(table__.c.id.in_(id_list))
+            result = session.execute(stm)
+            session.commit()
+            count += result.rowcount
+        logger.info(f'delete_data: {table__.name} row count: {result.rowcount}')
 
-for table in tables:
-    try:
+    def run_cleanup(self):
         logger.info(
-            f'################################################## ROOT ##################################################')
-        logger.info(f'reflecting table config: {table}')
-        table_ = metadata_obj.tables[table['name']]
-        logger.info(f'reflected table: {table_}')
-        table_temp = metadata_obj.tables[table['temp']]
-        logger.info(f'reflected table_temp: {table_temp}')
+            f'################################################## run_cleanup ##################################################')
+        iteration = 0
+        for table in self.tables:
+            try:
+                iteration += 1
+                logger.info(f'Iteration: {iteration}')
+                logger.info(f'reflecting table config: {table}')
+                table_ = self.__metadata__.tables[table['name']]
+                logger.info(f'reflected table: {table_}')
+                table_temp = self.__metadata__.tables[table['temp']]
+                logger.info(f'reflected table_temp: {table_temp}')
 
-        while True:
-            id_list = select_data(table_temp)
-            if not id_list:
-                break
-            delete_data(table_, id_list)
-            delete_data(table_temp, id_list)
-    except Exception as e:
-        import traceback
-        logger.info(f'EXCEPTION')
-        traceback.print_exc()
-        continue
+                while True:
+                    # TODO: remove commit from private methods and move here
+                    id_list = self.__select_data__(table_temp, limit_=self.limit)
+                    if not id_list:
+                        break
+                    self.__delete_data__(table_, id_list)
+                    self.__delete_data__(table_temp, id_list)
+            except Exception as e:
+                import traceback
+                logger.info(f'EXCEPTION')
+                traceback.print_exc()
+                continue
